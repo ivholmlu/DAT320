@@ -1,0 +1,343 @@
+---
+title: "Exercise1_Group11"
+author: "Ivar Holmlund, Jon Markus Berg"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Exercise 1
+
+## Loading the data from global environment
+```{r}
+data1 <- read.csv("assignment 1 - data/gapminder.csv")
+data1
+```
+
+##1a) Converting categorical to factors and others to suitable type
+```{r}
+data1$country <- as.factor(data1$country)
+data1$continent <- as.factor(data1$continent)
+
+# Converting year and pop to integers
+data1$year <- as.integer(data1$year)
+data1$pop <- as.integer(data1$pop)
+
+#Converting GDP and LifeExp and GdpPerCapita to continous
+data1$lifeExp <- as.numeric(data1$lifeExp)
+data1$gdpPercap <- as.numeric(data1$gdpPercap)
+```
+
+## 1b) Plotting each country 
+```{r}
+library(ggplot2)
+
+
+ggplot(data1, aes(x=year, y=lifeExp, z=country, colour = continent))+ geom_line() + geom_point()
+```
+## 1c) Summary 
+
+```{r}
+library(dplyr)
+summary_lifeExp <- data1 |> group_by(continent, year) |> summarize(mean_lifeExp = mean(lifeExp), min_lifeExp = min(lifeExp), median_lifeExp = median(lifeExp), max_lifeExp = max(lifeExp), sd_lifeExp = sd(lifeExp))
+summary_lifeExp
+```
+```{r}
+
+class(summary_lifeExp)
+
+```
+## 1d)
+
+```{r}
+
+lifeExp_plot <- ggplot(summary_lifeExp, aes(x = year, y = mean_lifeExp)) + geom_ribbon(aes(ymin=mean_lifeExp - sd_lifeExp, ymax= mean_lifeExp + sd_lifeExp), fill = "grey40")+ geom_line() + geom_point() 
+
+
+all_plots <- lifeExp_plot + facet_grid(rows = vars(continent)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+all_plots
+
+
+```
+
+
+# Exercise 2
+
+```{r}
+weather_data <- read.csv("assignment 1 - data/weatherHistory.csv")
+```
+
+
+Looking at the first 10 rows of each attribute
+```{r}
+print(weather_data[1:100, ])
+```
+All columns marked with the chr is categorical:
+"Formatted.Date" "Summary"        "Precip.Type"    "Daily.Summary" 
+
+Summary is a short explanation of the weather. 
+Which can be found using:
+```{r}
+categorical_columns <- sapply(weather_data,function(col) is.factor(col) || is.character(col))  # Check for factor columns
+names(weather_data)[categorical_columns]
+```
+
+Getting the numerical columns:
+```{r}
+# Check for numerical columns (numeric or integer)
+numerical_columns <- sapply(weather_data, function(col) is.numeric(col) || is.integer(col))
+
+# Get the names of numerical columns
+numerical_column_names <- names(weather_data)[numerical_columns]
+
+cat("Numerical columns:\n")
+for (col_name in numerical_column_names) {
+  cat(col_name, "\n")
+}
+```
+Before looking into the columns, i will ensure the dataframe is a time series.
+```{r}
+weather_data$Formatted.Date <- as.Date(weather_data$Formatted.Date)
+```
+
+Looking at the target label for our models later on
+```{r}
+  ggplot(weather_data, aes(x = Formatted.Date, y = Temperature..C.)
+         ) + geom_line()
+```
+
+Looking at the different weather types and their distributions.
+```{r}
+ggplot(weather_data, aes(x=weather_data$Summary, fill=weather_data$Summary))+ geom_bar()+
+theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),  # Rotate and adjust x-axis labels
+    axis.text.y = element_text(hjust = 0)  # Align y-axis text to the left
+  ) + coord_flip()  
+```
+
+Here we see that the most common types are cloudy, and clear. There is also few of many of the differnet types.`   
+
+### Creating dummies for categorized columns:
+
+```{r}
+# Install the required package
+#install.packages("fastDummies")
+ 
+# Load the library
+library(fastDummies)
+
+data <- dummy_cols(weather_data, 
+                   select_columns = c("Summary", "Precip.Type", "Daily.Summary"),
+                   remove_selected_columns = TRUE)
+ 
+# Print
+print(data)
+```
+
+### Splitting data randomly into 75% training and 25% test
+
+```{r}
+
+# https://stackoverflow.com/questions/17200114/how-to-split-data-into-training-testing-sets-using-sample-function
+## 75% of the sample size
+smp_size <- floor(0.75 * nrow(data))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+train_ind <- sample(seq_len(nrow(data)), size = smp_size)
+
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+```
+
+Showing the sizes, to check if seems correct
+```{r display-data, echo=FALSE}
+nrow(train)
+nrow(test)
+```
+Seems about right:)
+Now we standardise the dataset, as last thing before training
+
+```{r}
+columns_to_scale <- c("Temperature..C.", "Apparent.Temperature..C.", "Humidity", 
+                      "Wind.Speed..km.h.", "Wind.Bearing..degrees.", "Visibility..km.", 
+                      "Loud.Cover", "Pressure..millibars.") 
+data[c(columns_to_scale)] <- as.data.frame(scale(data[c(columns_to_scale)])) 
+data
+```
+
+### Training a model
+
+Using the Temperature.C, Wind.Speed, Humidity, and Precip.Type we fit a linear regression with Apparent Temperature C as target.
+
+
+```{r}
+train <- data[train_ind, c("Temperature..C.", "Humidity", "Wind.Speed..km.h.", "Precip.Type_rain", "Precip.Type_snow")]
+train_pred <- data[train_ind, "Apparent.Temperature..C."]
+test <- data[-train_ind, c("Temperature..C.", "Humidity", "Wind.Speed..km.h.", "Precip.Type_rain", "Precip.Type_snow")]
+test_pred <- data[-train_ind, "Apparent.Temperature..C."]
+model <- lm(train_pred~., data=train)
+summary(model)
+```
+We see that the R^2 score is 0.9899.
+
+```{r }
+pred = predict(model, test)
+sd_temp = sd(weather_data$Apparent.Temperature..C.)
+modelEval <- cbind(test_pred, pred) * sd_temp
+colnames(modelEval) <- c("Actual", "Predicted")
+modelEval <- as.data.frame(modelEval)
+
+mse <- mean((modelEval$Actual - modelEval$Predicted)^2)
+rmse <- sqrt(mse)
+mse
+rmse
+```
+
+Given the numbers, the model is missing approximately 1 degree C on average
+The parameters are all far below 0.05 in P-value, indicating that they are all describing variables of apparent temperature.
+
+# Exercise 3
+
+**Linearity** is that there exist an linear relationship between the target variable, and the predictors.
+
+**Homoscedasticity** The residuals should be randomly distriubuted, and no patterns should emerge.
+
+**Independence** There should not be too much similarity between the samples, they should all explain different parts.
+
+**Normality**  The distribution of the residual, should be close to a normal distribution, with a mean close to 0.
+
+
+## 3b)
+
+**Residuals vs fitted** Checks the linearity and homodescadascity. Plotting the fitted values, against the residuals shows the corresponding residuals to the predictions. It is expected to be randomly distributed around zero.
+
+**Normal Q-Q** Checking if the residuals are normally distributed. Plotting the theoretical "perfect" distribution of residuals, vs the actual distribution.
+
+**Scale location** Used to reveal trends in the magnitude of scales in the residuals. If the shape of the residuals is fan-shaped or a funnel, i suggests heteroscedascity.
+
+**Residuals vs leverage** Used to show which samples could have a large influence on the linear regression model. The x-axis shows the leverage of each point, while the y axis shows the standardized residual.
+
+## 3c)
+
+Pasting in the syntax from `diagnosticplot.rmd` to generate the plots:
+The base syntax keeps the assumptions
+```{r}
+library(ggplot2)
+
+set.seed(42)
+
+n <- 1000
+x <- 1:n
+
+contant <- 0
+trend <- 0
+curve_magnitue <- 0
+curve_period <- 100
+curve_shift <- 0
+normal_noise_magnitue <- 1
+norm_noise_periode <- 10000
+shift_norm_noise <- 500
+non_normal_noise_magnitue <- 0
+non_norm_noice_periode <- 10000
+shift_non_norm_noise <- 500
+
+y.gen <- contant +
+  trend * x + 
+  curve_magnitue* sin(
+    (x/curve_period + curve_shift)*pi
+    
+    ) + 
+  normal_noise_magnitue*cos(
+    (x/norm_noise_periode + shift_norm_noise/norm_noise_periode)*pi
+    )*rnorm(n, sd = 3) +
+  non_normal_noise_magnitue*cos(
+    (x/non_norm_noice_periode + shift_non_norm_noise/non_norm_noice_periode)*pi
+    ) * rexp(n, rate = 0.2) 
+
+p <- qplot(x, y.gen, ylab = "y") +
+  geom_point(size = 0.1) +
+  labs(title = "Data generate for linear regrestion")
+
+lm.gen <- lm(y.gen ~ x)
+plot(lm.gen, which = 1)
+plot(lm.gen, which = 2)
+plot(lm.gen, which = 3)
+plot(lm.gen, which = 5)
+```
+
+Breaking the assumptions
+Increasing the shift norm noise, causing the points to funnel out with greater X
+This breaks the assumption of Homoscedasticity, that the residuals should be randomly distributed.
+Breaks the assumption of normality, as seen in the QQ-plot. The residuals are not normally distributed.
+
+```{r}
+library(ggplot2)
+
+set.seed(42)
+
+n <- 1000
+x <- 1:n
+
+# Changeable parameters
+# - Change the parameters to affect the generated data points below.
+# - You may copy this code multiple times to answer all the questions in the exercise.
+# - You may find it reasonable to argue for multiple violations from a single generated set of data points.
+
+contant <- 0
+trend <- 0
+curve_magnitue <- 0
+curve_period <- 100
+curve_shift <- 0
+normal_noise_magnitue <- 1
+norm_noise_periode <- 10000
+shift_norm_noise <- 5000
+non_normal_noise_magnitue <- 0
+non_norm_noice_periode <- 10000
+shift_non_norm_noise <- 500
+
+y.gen <- contant +
+  trend * x + #MAKING THE ERROR DEPENDING ON THE X ITSELF.
+  curve_magnitue* sin(
+    (x/curve_period + curve_shift)*pi
+    ) +
+  normal_noise_magnitue*cos(
+    (x/norm_noise_periode + shift_norm_noise/norm_noise_periode)*pi
+    )*rnorm(n, sd = 3)  +
+  non_normal_noise_magnitue*cos(
+    (x/non_norm_noice_periode + shift_non_norm_noise/non_norm_noice_periode)*pi
+    ) * rexp(n, rate = 0.2) 
+
+p <- qplot(x, y.gen, ylab = "y") +
+  geom_point(size = 0.1) +
+  labs(title = "Data generate for linear regrestion")
+
+# Display the plot
+print(p)
+lm.gen <- lm(y.gen ~ x)
+plot(lm.gen, which = 1)
+plot(lm.gen, which = 2)
+plot(lm.gen, which = 3)
+plot(lm.gen, which = 5)
+```
+Setting the curve magnitude to 30, making the values into a wave.
+This breaks the assumption of linearity, seen in the pattern in residuals vs fitted. The residual are dependent on the predicted value.
+
+### 3d)
+
+Give an explanation of how the relationships between the Y and X in c) violates the
+assumptions for linear regression.
+
+Due to the relationship of Y and X not being linear, the assumption is broken. In both the funnel and the wave plots, the assumption is broken, since there exist noe good way to describe the data linearly.
+
+# Exercise 4
+```{r}
+
+
+
+```

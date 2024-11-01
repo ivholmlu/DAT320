@@ -1,0 +1,646 @@
+---
+title: "Assignment 2"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Task 1: Dimension reduction on air quality data
+
+## Part A: Get
+
+-   Obtain data from <https://archive.ics.uci.edu/dataset/360/air+quality>.
+
+```{r Load_air_data, include=FALSE}
+temp <- tempfile()
+download.file("https://archive.ics.uci.edu/static/public/360/air+quality.zip", temp)
+unzip(temp, exdir = tempdir())
+```
+
+```{r read AirQualityUCI.csv}
+df <- read.table( "AirQualityUCI.csv", header=TRUE, sep=";")
+```
+
+**Provide a brief description of the data based on the information from the website.**
+
+The dataset contains 9358 instances of hourly averaged responses from an array of 5 metal oxide chemical sensors embedded in an Air Quality Chemical Multisensor Device. Which is a low cost device. The device was located on the field in a significantly polluted area, at road level, within an Italian city.  The data were recorded from March 2004 to February 2005. It also consist of 5 columns, noted with .GT for being the ground truth. It originates from a co-located certified reference analyzer.
+
+
+
+## Part B: Import and Visualize
+
+-   Load the data and convert to tsibble.
+    -   Make sure dates and hours are converted into proper time objects
+    -   Remove incomplete days at beginning and end of data
+
+```{r Making datetime column, include=FALSE}
+library(lubridate)
+
+df$datetime <- with(df, dmy(df$Date) + hms(df$Time))
+```
+
+```{r Removing incomplete days and empty columns., include=FALSE}
+library(tsibble)
+library(dplyr)
+library(lubridate)
+
+
+df <- df %>%
+filter(Time!="")
+drops = c("Date", "Time", "X", "X.1") # Removing not needed cols. X and X.1 empty, and Date, Time stored in datetime
+df <- df[ , !(names(df) %in% drops)] 
+```
+
+```{r }
+
+df <- df %>%
+  filter(!(as.Date(datetime) %in% as.Date(c("2004-03-10", "2005-04-04"))))
+
+df <- df %>%
+  mutate(across(where(is.character), ~ as.numeric(gsub(",", ".", .)))) 
+
+tsib_df <- as_tsibble(df, index = "datetime")
+print(tsib_df)
+```
+
+-   **Plot the data as is, preferably as multiple panels in a single plot**
+
+```{r}
+library(ggplot2)
+library(dplyr)
+for (col in colnames(tsib_df)) {
+  if (col == "datetime") {
+    next  
+  }
+    p <- ggplot(tsib_df, aes_string(x = "datetime", y = col)) +
+      geom_line() +
+      labs(title = paste("Time Series Plot of", col),
+           y = col) +
+      theme_minimal()
+    print(p)
+  }
+```
+The plot of each column, shows where na's occure. In the dataset it is denoted as -200.
+
+```{r}
+na_counts <- sapply(tsib_df, function(x) sum(x == -200, na.rm = TRUE))
+na_counts <- na_counts[order(-na_counts)]
+
+cat(sprintf("Amount of cols: %d \n", length(na_counts)))
+cat("Amount of missing values in each column\n")
+for (col in names(na_counts)) {
+  count <- na_counts[col]
+  if (count > 0) {
+
+    cat(sprintf("%-13s : %d amount\n", col, count)) 
+  }
+}
+```
+
+-   **Describe the data. What is most striking?** 
+The most important to take not of, is that there is quite a lot of missing values within the dataset. As example, NMHC.GT is missing all values after 01.05.2014. It is information about the "True hourly averaged overall Non Metanic HydroCarbons concentration in microg/m\^3". According to the paper, the NMHC.GT. went out of service after only 8 days. Explaining the very high lack of NaN values, which one would need to keep in mind moving on.
+
+There is also a very consistent lack of NaN values in 9 of the columns, indicating that there might be a systematic error in the dataset. All marked as integer, is missing more than 366 values, and the ground truth measurements miss alot more. 
+
+## Part C: PCA of data as is
+
+-   Perform PCA on the data as prepared in B
+-   Create a screeplot and create biplots for 1st and 2nd and for 2nd and 3rd PCs
+-   Plot the scores for the PCs
+-   Comment on the results. Can you relate some features to your observations in part B?
+
+```{r}
+library(tsibble)
+library(dplyr)
+library(ggfortify)
+library(tidyr)
+
+# Perform PCA
+pc <- prcomp(tsib_df[, names(tsib_df)!="datetime"], scale=TRUE) 
+
+screeplot(pc, main = "Scree Plot", col = "blue", type = "lines")
+autoplot(pc, loadings.label=TRUE)
+autoplot(pc, x=2, y = 3, loadings.label=TRUE)
+```
+
+See that the screeplot generate a fast falling curve that stales towards 0, which is to be expected, since most variance will be captured in the first component, and then less and less moving on.
+
+For the PC1 and PC2, we suspect that the PC1 is separating the NAN values and rest of the dataset. And PC2 is catching some variance within that.
+
+For the PC2 and PC3, there is separated into 3 clusters, where we suspect that upper right is all NAN values. Some of the .GT columns seems to be a bit independent regarding when NAN values occur, therefore we suspect that they contribute more to the second cluster.The orthogonality away from the other measurements might only come from the Nan values, and not true variance.
+
+As mentioned earlier, the NMHC.GT has many NAN values, and by looking at its small loading we notice that it is not contributing alot.
+
+## Part D: Missing values
+
+-   **Identify missing values in the time series** Mentioned under describe the data in Part B
+-   **Investigate to which degree missing values occur at the same time for multiple sensors**
+
+```{r}
+missing_df <- tsib_df[tsib_df$PT08.S1.CO. ==-200, ] # Finding the index where PT08 is returning NAN
+
+for (feature in colnames(missing_df)){
+  a <- sum(missing_df[[feature]]==-200)
+  cat(sprintf("%-13s : %-6.0f null values \n", feature, a ))
+}
+```
+```{r}
+missing_df <- tsib_df[tsib_df$NO2.GT. ==-200, ] # Finding the index where PT08 is returning NAN
+
+for (feature in colnames(missing_df)){
+  a <- sum(missing_df[[feature]]==-200)
+  cat(sprintf("%-13s : %-6.0f null values \n", feature, a ))
+}
+```
+
+
+-   **Is one or are multiple sensors behaving peculiarly? How would you handle this?**
+By comparing the indexes of where PTO8.S1.CO is returning NAN, with the other columns as well, we see that our suspicion regarding several failing at the same time is confirmed. All sensors from the multi sensor has 366 missing values, have the failing at the same indexes.
+
+The GT sensors, are also higly correlated in where they return NAN. (CO.GT, NOx.GT and NO2.GT)
+
+
+
+-   Discuss options for handling missing values: (a) drop all time points containing any missing value, (b) impute values for missing values. In case of (b) choose a method for imputation. Justify your decisions.
+
+When dropping all time points where NAN occure, we could possibly lose a lot of valuable data. We decided to drop the NMHC.GT column, even though it contains the ground truth for PT08.S2.NMHC. With only 8 days, it would be to ambitious to interpolate, and to much to drop.
+After dropping NMHC.GT column, we dropped all rows with NaN values. Removing 2415 rows.
+Since it is the missing .GT values being removed, we have a dataset consisting of the ground truth and multi sensor data.
+
+**Creating dataset, removing all NAN values**
+
+```{r}
+tsib_df_no_NMHC <- tsib_df %>%
+  select(-NMHC.GT.)
+
+# Print the size of the original data frame
+original_size <- dim(tsib_df_no_NMHC)
+cat("Original Size: Rows =", original_size[1], ", Columns =", original_size[2], "\n")
+tsib_df_no_NMHC[tsib_df_no_NMHC == -200] <- NA
+
+# Filter out rows with NA and store the result in a new data frame
+tsib_df_no_NMHC = tsib_df_no_NMHC %>%
+  drop_na()
+
+
+# Print the size of the filtered data frame
+filtered_size <- dim(tsib_df_no_NMHC)
+cat("Filtered Size: Rows =", filtered_size[1], ", Columns =", filtered_size[2], "\n")
+cat("Rows removed: ", original_size[1] - filtered_size[1], "\n")
+```
+
+-   At the end of this step, you should have a version of the data containing only valid values. Plot these data as in Part B.
+
+## Part E: PCA of cleaned data
+
+-   Perform PCA on the data as prepared in D
+-   Create a screeplot and biplots for 1st/2nd, 2nd/3rd, 3rd/4th PC
+
+```{r}
+library(tsibble)
+library(dplyr)
+library(ggfortify)
+
+pc_cleaned <- prcomp(tsib_df_no_NMHC[, names(tsib_df_no_NMHC)!="datetime"], scale=TRUE)
+
+screeplot(pc_cleaned, main = "Scree Plot", col = "blue", type = "lines")
+autoplot(pc_cleaned, loadings.label=TRUE)
+autoplot(pc_cleaned, x=2, y = 3, loadings.label=TRUE)
+autoplot(pc_cleaned, x=3, y = 4, loadings.label=TRUE)
+```
+
+After the removal of the NAN values, there is no longer a clear clustering in the components.
+
+-   Compute total variance explained by 1st, 1st and 2nd, 1st to 3rd, ... PCs
+-   Choose how many PCs to keep and transform data back to original sample space
+
+```{r}
+variance_explained <- summary(pc_cleaned)$importance[2, ]
+variance_explained
+
+total_variance_pc1_pc2 <- sum(variance_explained[1:2])
+total_variance_pc1_pc3 <- sum(variance_explained[1:3])
+total_variance_pc1_pc4 <- sum(variance_explained[1:4])
+
+cat("Total variance explained by PC1 -> PC2: ", round(total_variance_pc1_pc2 * 100, 2), "%\n")
+cat("Total variance explained by PC1 -> PC3: ", round(total_variance_pc1_pc3 * 100, 2), "%\n")
+cat("Total variance explained by PC1 -> PC4: ", round(total_variance_pc1_pc4 * 100, 2), "%\n")
+
+```
+Using 3 PCS, since from 4 and further on, not much of the variance is explained.
+
+```{r}
+
+reconstructed_data <- t(t(pc_cleaned$x[, 1:3] %*% t(pc_cleaned$rotation[, 1:3])) * pc_cleaned$scale + pc_cleaned$center)
+reconstructed_df <- as.data.frame(reconstructed_data)
+reconstructed_df$datetime <- tsib_df_no_NMHC$datetime
+```
+
+-   Plot the result against the cleaned data, compare and discuss
+
+```{r}
+#Plot columns from reconstructed_df and tsib_df_no_NMHC against each other
+for (col in colnames(reconstructed_df[names(reconstructed_df)!="datetime"])) {
+  
+  p <- ggplot() +
+    geom_line(data = tsib_df_no_NMHC, aes_string(x = "datetime", y = col), color = "blue",) +
+    geom_line(data = reconstructed_df, aes_string(x = "datetime", y = col), color = "red") +
+    labs(title = paste("Time Series Plot of", col),
+         y = col) +
+    theme_minimal()
+  print(p)}
+
+```
+The original is blue, and reconstructed is red.
+From the plots, wee see that the general trend is that the converted data is has less variance, which indicates that some noise could have been removed from the dataset. The removed noise was not explained by the 3 first principal components.
+
+-   Also plot the scores, zoom in to short time intervals and look at periodicity
+
+```{r}  
+pc_scores <- pc_cleaned$x[, 1:3] # Getting pc values for all rows.
+pc_scores <- as.data.frame(pc_scores)
+pc_scores$datetime <- tsib_df_no_NMHC$datetime
+
+for (col in colnames(pc_scores[, names(pc_scores) != "datetime"])) {
+  
+  p <- ggplot() +
+    geom_line(data = pc_scores, aes_string(x = "datetime", y = col), color = "blue") +
+    labs(title = paste("Principal component:", col, "for all data"),
+         y = col) +
+    theme_minimal()
+  print(p)}
+```
+
+```{r}
+pc_scores <- pc_cleaned$x[, 1:3] # Getting pc values for all rows.
+pc_scores <- as.data.frame(pc_scores)
+pc_scores$datetime <- tsib_df_no_NMHC$datetime
+
+filtered_scores <- pc_scores %>%
+  filter(datetime >= "2004-03-11 00:00:00" & datetime <= "2004-03-22 00:00:00")
+#Print PC1, PC2 and PC3 scores
+for (col in colnames(filtered_scores[, names(filtered_scores) != "datetime"])) {
+  
+  p <- ggplot() +
+    geom_line(data = filtered_scores, aes_string(x = "datetime", y = col), color = "blue") +
+    labs(title = paste("Principal component:", col, "for a 11 day interval"),
+         y = col) +
+    theme_minimal()
+  print(p)}
+
+```
+-   Can you interpret certain PCs?
+
+PC1 clearly captures some daily periodicity, but also PC2 and PC3 does the same. In the short time span of 11 days, PC2 seem to have some rising trend, but is likely caused by the yearly periodicity, which is rising in march.
+
+
+# Task 2: STL and correlation on weather data
+
+## Part A: Data collection for a single station
+
+Based on material from the lectures, write an R function that can obtain a daily average temperature series for a meteorological station from the Norwegian Met Institute's Frost service. The function shall return a tsibble.
+
+```{r}
+# Used https://frost.met.no/r_example.html as a reference
+
+
+library(jsonlite)
+library(tidyr)
+
+
+#function
+get_station_data <- function(station_id) {
+
+client_id <- "df073266-cbaf-4903-a3c2-4ffc75fcd21b"
+# Define andpoint and parameters
+endpoint <- paste0("https://", client_id, "@frost.met.no/observations/v0.jsonld")
+elements <- 'mean(air_temperature P1D)'
+referenceTime <- '1950-01-01/2024-09-01'
+timeoffsets <- 'PT0H'
+
+# Build the URL to Frost
+url <- paste0(
+    endpoint, "?",
+    "sources=", station_id,
+    "&referencetime=", referenceTime,
+    "&elements=", elements,
+    "&timeoffsets=", timeoffsets
+)
+# Issue an HTTP GET request and extract JSON data
+xs <- try(fromJSON(URLencode(url),flatten=T))
+
+# Check if the request worked, print out any errors
+if (class(xs) != 'try-error') {
+    df <- unnest(xs$data, cols=everything())
+    print("Data retrieved from frost.met.no!")
+} else {
+    print("Error: the data retrieval was not successful!")
+}
+df <- df[, c("referenceTime", "value")]
+df$referenceTime <- as.Date(df$referenceTime)
+
+
+return(as_tsibble(df, index = "referenceTime"))
+}
+```
+
+```{r}
+raw_df <- get_station_data("SN17850") # Ås
+```
+
+
+```{r}
+ggplot(raw_df, aes(x=referenceTime, y=value)) + geom_line()
+```
+
+
+
+
+## Part B: Data preparation for a single station
+
+-   Identify gaps in the time series.
+
+
+```{r}
+library(tidyverse)
+
+# find gaps
+gaps <- raw_df %>%
+  count_gaps(.full = TRUE)
+#plot gaps
+ggplot(gaps, aes(x=.from, y=.n)) + geom_point() + ggtitle(paste0(length(gaps$.n), " Gaps in the time series, total missing days: ", sum(gaps$.n)))
+
+```
+
+
+-   Assume that gaps up to 31 days are acceptable. Find the earliest date in the time series such that all following data have no gaps longer than 31 days. Limit the time series to this.
+
+```{r}
+# find the earliest date in the time series such that all following data have no gaps longer than 31 days
+gaps <- gaps %>%
+  filter(.n > 31)
+
+raw_df <- raw_df %>%
+  filter(referenceTime >= max(gaps$.to))
+```
+
+
+-   Create a regular time series by filling gaps in the tsibble with n/a-s.
+
+```{r}
+# Create a regular time series by filling gaps in the tsibble with n/a-s.
+df_full <- fill_gaps(raw_df, .full = TRUE)
+```
+
+
+-   Impute values for the n/a-s. Justify your choice of imputation method.
+
+```{r}
+library(imputeTS)
+
+# Impute values
+df <- df_full %>% na_interpolation()
+
+```
+
+
+-   You should now have a regular time series with only numeric values.
+
+```{r}
+sum(is.na(df$value))
+```
+
+
+-   Remove all data for 29 February so all years have data for exactly 365 days.
+
+```{r}
+# Remove every 29. of February
+df <- df %>% filter(!(month(referenceTime) == 2 & day(referenceTime) == 29))
+```
+
+
+-   Combine all this code into a function for re-use later. The function should receive the original tsibble from part A as input and return a new tsibble.
+
+```{r}
+
+prepare_station_data <- function(raw_df) {
+  # find gaps
+  gaps <- raw_df %>%
+    count_gaps(.full = TRUE)
+  
+  # find the earliest date in the time series such that all following data have no gaps longer than 31 days
+  gaps <- gaps %>%
+    filter(.n > 31)
+  
+  if (nrow(gaps) > 0) {
+    raw_df <- raw_df %>%
+      filter(referenceTime >= max(gaps$.to))
+  }
+  
+  # Create a regular time series by filling gaps in the tsibble with n/a-s.
+  df_full <- fill_gaps(raw_df, .full = TRUE)
+  
+  # Impute values linearly
+  df <- df_full %>% na_interpolation()
+  
+  # Remove every 29. of February
+  df <- df %>% filter(!(month(referenceTime) == 2 & day(referenceTime) == 29))
+  
+  return(df)
+}
+```
+
+## Part C: Exploratory analysis for a single station
+
+-   Plot the temperature data as function of time
+
+```{r}
+ggplot(df, aes(x=referenceTime, y=value)) + geom_line()
+```
+
+
+-   Create density plots of original data and data with imputed values
+
+```{r}
+ggplot() + geom_density(raw_df, mapping = aes(x=value, color="blue"), color="blue") + geom_density(df, mapping = aes(x=value, colour = "red"), color="red") + labs(title="Density plot of original(Blue) and imputed(Red) data", x="Temperature", y="Density") 
+    
+```
+
+-   Turn the temperature data into a timeseries (ts) object
+
+```{r}
+ts_df <- ts(df$value, start=c(year(min(df$referenceTime)), month(min(df$referenceTime)), day(min(df$referenceTime))), frequency=365)
+plot(ts_df)
+```
+
+
+-   Plot the autocorrelation function for lags up to 5.5 years; describe and discuss your observations
+
+```{r}
+library(forecast)
+library(ggfortify)
+
+autoplot(Acf(ts_df, lag.max=365*5.5))
+
+
+```
+There is a clear positive correlation for a year, and clear negative for half a year. The data has periodicity.
+
+-   Also plot the ACF only for short lags, up to four weeks
+
+```{r}
+autoplot(Acf(ts_df, lag.max=28))
+```
+Falling trend in relevancy, but after 4 weeks it is still pretty high. So within approximately a month, the dataset is still correlated.
+
+-   Select some days distributed throughout the year and plot temperature as function of year for, e.g., 1 October, as a scatter plot. This plot can be useful to choose the seasonality window later (see Figs 7 and 8 in Cleveland et al, 1990)
+
+```{r}
+# Select some days distributed throughout the year
+for (month in 1:12){
+  day <- 1
+  df_day <- df %>% filter(month(referenceTime) == month & day(referenceTime) == day)
+  p <- ggplot(df_day, aes(x=year(referenceTime), y=value)) + geom_point() + geom_abline() + ggtitle(paste0("Temperature in ", month.name[month])) 
+  print(p)
+
+}
+```
+First of each month chosen, showing that there is variance for each year. This indicates that a large trend window might be needed in the STL.
+
+## Part D: STL analysis
+
+-   Perform STL on the data. Explore different values for the seasonality and trend windows (remember that we want to look at trends over many years!), the choice between robust STL or not, and possibly the lowpass filter window. Describe your observations. It might be interesting to look at the ACF of the remainder in the STL result.
+
+```{r}
+stl_as <- stl(ts_df, s.window="periodic", t.window = 11*365, robust=TRUE)
+autoplot(stl_as)
+```
+Weak trend , rising from 6.75 to 7.25 degrees. The seasonality is well captured, and the remainder seems to be white noise. Valgte periodic for the s window, since the dataset has a clear periodic that does not change much.
+
+```{r}
+autoplot(Acf(stl_as$time.series[,3], lag.max=365*5.5))
+```
+The ACF for the noise shows that there is not alot of seasonal dependency in the remainder. Indicating that the STL is catching the trend and seasonailty well.
+
+-   Consult the original STL paper by Cleveland et al. (1990) for suggestions on how to choose STL parameters.
+-   Based on your analysis, can you suggest a set of STL parameters to use for further work?
+
+We suggest a periodic time window, and an 11 year span for the trend.
+
+
+
+## Part E: Multiple station analysis
+
+-   Obtain data from eight more stations. Two should be in the same part of Norway as the station from part A; then choose three stations each from two other parts of Norway. Data should cover several decades at least, so look for stations with long series.
+
+```{r}
+# Akershus og Østfold
+as_df <- df
+sarpsborg_df <- get_station_data("SN3190")
+sarpsborg_df <- prepare_station_data(sarpsborg_df)
+gardemoen_df <- get_station_data("SN4780")
+gardemoen_df <- prepare_station_data(gardemoen_df)
+
+# Vestlandet
+bergen_df <- get_station_data("SN50540")
+bergen_df <- prepare_station_data(bergen_df)
+haugesund_df <- get_station_data("SN47260")
+haugesund_df <- prepare_station_data(haugesund_df)
+sola_df <- get_station_data("SN44560")
+sola_df <- prepare_station_data(sola_df)
+
+# Finnmark
+kautokeino_df <- get_station_data("SN93700")
+kautokeino_df <- prepare_station_data(kautokeino_df)
+alta_df <- get_station_data("SN93140")
+alta_df <- prepare_station_data(alta_df)
+kirkenes_df <- get_station_data("	SN99370")
+kirkenes_df <- prepare_station_data(kirkenes_df)
+
+```
+
+```{r}
+cat("Akershus og Østfold\n")
+sprintf("First date at as is %s", min(as_df$referenceTime))
+sprintf("First date at sarpsborg is %s", min(sarpsborg_df$referenceTime))
+sprintf("First date at gardemoen is %s", min(gardemoen_df$referenceTime))
+cat("\nVestlandet\n")
+sprintf("First date at bergen is %s", min(bergen_df$referenceTime))
+sprintf("First date at haugesund is %s", min(haugesund_df$referenceTime))
+sprintf("First date at sola is %s", min(sola_df$referenceTime))
+cat("\nFinnmark\n")
+sprintf("First date at kautokeino is %s", min(kautokeino_df$referenceTime))
+sprintf("First date at alta is %s", min(alta_df$referenceTime))
+sprintf("First date at kirkenes is %s", min(kirkenes_df$referenceTime))
+
+```
+The shortes timeseries was 2003-1-10, so the multivariate time series start from there.
+
+
+-   Preprocess the data as described in Part B. Find the latest starting date of any series and create a multivariate time series with data from all nine stations starting at this date.
+```{r}
+min_time <- max(min(as_df$referenceTime), min(sarpsborg_df$referenceTime), min(gardemoen_df$referenceTime), min(bergen_df$referenceTime), min(haugesund_df$referenceTime), min(sola_df$referenceTime), min(kautokeino_df$referenceTime), min(alta_df$referenceTime), min(kirkenes_df$referenceTime))
+
+
+
+as <- as_df %>% filter(referenceTime >= min_time)
+sarpsborg <- sarpsborg_df %>% filter(referenceTime >= min_time)
+gardemoen <- gardemoen_df %>% filter(referenceTime >= min_time)
+
+bergen <- bergen_df %>% filter(referenceTime >= min_time)
+haugesund <- haugesund_df %>% filter(referenceTime >= min_time)
+sola <- sola_df %>% filter(referenceTime >= min_time)
+
+kautokeino <- kautokeino_df %>% filter(referenceTime >= min_time)
+alta <- alta_df %>% filter(referenceTime >= min_time)
+kirkenes <- kirkenes_df %>% filter(referenceTime >= min_time)
+
+# get all into one timeseries
+multivariate_tsibble <- tsibble(as, index="referenceTime") %>%
+  left_join(sarpsborg, by="referenceTime") %>%
+  left_join(gardemoen, by="referenceTime") %>%
+  left_join(bergen, by="referenceTime") %>%
+  left_join(haugesund, by="referenceTime") %>%
+  left_join(sola, by="referenceTime") %>%
+  left_join(kautokeino, by="referenceTime") %>%
+  left_join(alta, by="referenceTime") %>%
+  left_join(kirkenes, by="referenceTime")
+
+# rename columns
+colnames(multivariate_tsibble) <- c("referenceTime", "as", "sarpsborg", "gardemoen", "bergen", "haugesund", "sola", "kautokeino", "alta", "kirkenes")
+
+multivariate_ts <- ts(multivariate_tsibble[,2:10], start=c(year(min(multivariate_tsibble$referenceTime)), month(min(multivariate_tsibble$referenceTime)), day(min(multivariate_tsibble$referenceTime))), frequency=365)
+```
+
+
+
+-   Obtain the cross-correlation matrix between the nine stations. Is there any structure in this 9x9 matrix?
+
+```{r}
+cor(multivariate_tsibble[,2:10])
+```
+The stations from the same region ar more correlated then the stations from different regions. This is expected since the stations from the same region are closer to each other and therefore have more similar weather. 
+
+
+-   Perform STL individually on each of the nine stations using the parameters from part D. Compare the resulting trends. Are all STL results of equal quality?
+
+```{r}
+places = c("as", "sarpsborg", "gardemoen", "bergen", "haugesund", "sola", "kautokeino", "alta", "kirkenes")
+for (i in 1:9){
+  stl_i <- stl(multivariate_ts[, i], s.window="periodic", t.window = 11*365, l.window = 365,  robust=TRUE)
+  p <- autoplot(stl_i, main=places[i])
+  print(p)
+}
+```
+
+The quality of the STL results are equal for all stations. The seasonality and trend is well captured for all stations. The variance of the remainder seems to follow the variance of the data. Large variance in the timeseries, causes larger remainder.
+
+
+```{r PCA}
+pc <- prcomp(multivariate_tsibble[, names(multivariate_tsibble)!="referenceTime"], scale=TRUE) 
+
+```
+
+```{r}
+autoplot(pc, loadings.label=TRUE)
+```
