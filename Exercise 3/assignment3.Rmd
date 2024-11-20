@@ -1,0 +1,736 @@
+---
+title: "Oppgave 3"
+output: html_notebook
+---
+
+```{r Load data, warning=FALSE}
+library(readr)
+as_locale <- locale(time_format = "%H:%M:%S", date_format = "%Y-%m-%d", decimal_mark = ",", tz="CET")
+df <- read_csv2("data/consumption_per_group_aas_hour.csv", locale=as_locale)
+```
+
+Using locale with timezone CET, since measurements are from Ås.
+
+```{r Select cols}
+library(dplyr)
+selected_df <- df %>% select(c("STARTTID", "FORBRUKSGRUPPE", "VOLUM_KWH"))
+selected_df
+```
+
+```{r Finding first time diff larger than 1}
+#Convert df to tsibble
+library(tsibble)
+library(ggplot2)
+ts <- as_tsibble(selected_df, key = FORBRUKSGRUPPE, index = STARTTID)
+gaps <- ts %>%
+  count_gaps(.full = TRUE)
+gaps
+```
+
+There is one gap in the dataset, from 2021-04-05 05:00:00 to 2021-04-30 23:00:00.
+
+```{r Indexing from 2021-05-01 00:00:00.}
+
+ts <- ts %>%
+  filter(STARTTID >max(gaps$.to))
+ts
+```
+
+```{r Aggregating}
+daily_ts <- ts %>%
+  index_by(Date = ~ as.Date(., tz="CET")) %>%
+  group_by(FORBRUKSGRUPPE) %>% 
+  summarise(VOLUM_KWH = sum(VOLUM_KWH))
+daily_ts
+```
+
+## TASK B)
+
+```{r Reading the excel sheets, echo=FALSE, message=FALSE, warning=FALSE}
+library(readxl)
+library(dplyr)
+library(tsibble)
+library(lubridate)
+
+# Initialize an empty list to store tsibbles for each year
+all_data <- list()
+
+# Iterate through each year
+for (year in 2018:2024) {
+    # Construct the filename based on the year
+    file_path <- paste0("data/Aas dogn ", year, ".xlsx")
+    
+    # Read the data for the current year
+    df <- read_excel(file_path)
+    
+    # Convert to tsibble and filter columns
+    ts <- df %>%
+        as_tsibble(index = DATO) %>%
+        select(DATO, LT, GLOB)
+    
+    # Append the tsibble to the list
+    all_data[[as.character(year)]] <- ts
+}
+
+# Combine all tsibbles into one
+combined_ts <- bind_rows(all_data)
+combined_ts
+```
+
+When looking at combined_ts, we see that the measurements are often taken at 00:10:00 and 22:10:00. Due to having some duplicate days, we decided to check the distribution of when the measurements were done.
+
+```{r}
+time_dist <-combined_ts %>%
+  mutate(HHMMSS = format(DATO, "%H:%M:%S")) %>% 
+  count(HHMMSS, sort = TRUE) %>%    
+  arrange(desc(n)) 
+time_dist
+```
+
+From the distribution, we see that 00:10:00 and 22:10:00 are the main measurement time, but there is 3 measurements at 00:00:00 and 1 at 12:30:00. Therefore to avoid having a measurement at daytime, while the rest are at night, we decided to remove the measurement at 12:30:00.
+
+```{r}
+library(dplyr)
+
+#Print amount of rows of combined_ts
+nrow(combined_ts)
+# Remove rows with HH:MM:SS == 12:30:00 and overwrite data_tsibble
+combined_ts <- combined_ts %>%
+  filter(format(DATO, "%H:%M:%S") != "12:30:00")
+nrow(combined_ts)
+
+```
+
+### Finding daily gaps in dataset.
+
+First checking nan values in LT
+
+```{r Find gaps in LT}
+library(tsibble)
+library(dplyr)
+library(lubridate)
+
+library(tsibble)
+library(dplyr)
+
+# Function to find daily gaps in the GLOB column
+library(dplyr)
+library(rlang)
+
+find_daily_gaps <- function(tsibble_data, col) {
+  # Ensure the data is grouped by day
+  tsibble_data <- tsibble_data %>%
+    mutate(date = as.Date(DATO)) %>%
+    group_by(date) %>%
+    summarise(has_data = any(!is.na({{ col }})), .groups = 'drop')
+  
+  # Identify missing days
+  all_days <- seq(min(tsibble_data$date), max(tsibble_data$date), by = "day")
+  gaps <- data.frame(date = all_days) %>%
+    left_join(tsibble_data, by = "date") %>%
+    filter(!has_data) %>%
+    select(date)
+  
+  return(gaps)
+}
+
+
+gaps <- find_daily_gaps(combined_ts, col = GLOB)
+print("Daily gaps in GLOB column:")
+print(gaps$date)
+
+gaps <- find_daily_gaps(combined_ts, col=LT)
+print("Daily gaps in LT column:")
+print(gaps$date)
+
+```
+
+We see that only GLOB has nan values, and LT has no nan values. There might be some daily gaps, but we will interpolate the missing GLOB values first.
+
+```{r warning=FALSE}
+library(imputeTS )
+combined_ts <- combined_ts %>%
+  mutate(GLOB = na_interpolation(GLOB))
+```
+
+```{r Findng daily gaps in dataset}
+library(dplyr)
+library(tsibble)
+
+combined_daily <- combined_ts %>%
+  index_by(DAY = ~ as.Date(.)) %>% 
+  summarize(
+    LT = first(na.omit(LT)), 
+    GLOB = first(na.omit(GLOB))
+  ) %>%
+  as_tsibble(index = DAY, regular = TRUE)
+
+# Detect gaps at the daily level
+gaps <- combined_daily %>%
+  count_gaps(.full = TRUE)
+
+gaps
+```
+
+We see that there i only three days where there has been no measurments. We will use linear interpolation here. **WHY**
+
+```{r Fill gaps with NA, then impute}
+
+library(imputeTS)
+ts_imputed <- combined_daily %>% fill_gaps() %>% na_interpolation() %>% as_tsibble(index=DAY)
+ts_imputed
+
+```
+
+### TASK C)
+
+Find the range of dates for each of the two data sets
+
+```{r Finding start and end time for both datasets}
+start_end_times <- tibble(
+  Dataset = c("ts_imputed", "daily_ts"),
+  Start_Time = c(min(ts_imputed$DAY), min(daily_ts$Date)),
+  End_Time = c(max(ts_imputed$DAY), max(daily_ts$Date))    
+)
+print(start_end_times)
+```
+
+The time series for power consumption is the shortest starting at 2021-05-01 and ending at 2024-09-30. Therefore we combine the datasets from these dates.
+
+```{r Split up daily_ts}
+library(tidyr)
+library(dplyr)
+
+daily_ts_wide <- daily_ts %>%
+  pivot_wider(
+    names_from = FORBRUKSGRUPPE, 
+    values_from = VOLUM_KWH,
+    names_sep = "_",
+    names_prefix = "",
+    names_glue = "{FORBRUKSGRUPPE}_KWH"
+  )
+```
+
+```{r Combining datasets}
+start_date <- max(c(min(ts_imputed$DAY), min(daily_ts$Date)))
+end_date <- min(c(max(ts_imputed$DAY), max(daily_ts$Date)))
+
+merge_ts = merge(ts_imputed, daily_ts, by.x = "DAY", by.y = "Date")
+merge_ts_wide = merge(ts_imputed, daily_ts_wide, by.x = "DAY", by.y = "Date") # Wide is with better names.
+```
+
+```{r Remove leap days}
+
+merge_ts <- merge_ts %>%
+  filter(!(month(DAY) == 2 & day(DAY) == 29))
+merge_ts_wide <- merge_ts_wide %>%
+  filter(!(month(DAY) == 2 & day(DAY) == 29))
+```
+
+## PART 2
+
+### Task D
+
+```{r Vizualising the combined dataset}
+library(ggplot2)
+#install.packages("patchwork")
+library(patchwork)
+
+# Plot 1: Energy Consumption for Each Group Over Time
+p1 <- ggplot(merge_ts, aes(x = DAY, y = VOLUM_KWH, color = FORBRUKSGRUPPE)) +
+  geom_line() +
+  labs(title = "Energy Consumption for Each Group Over Time",
+       x = "Date", y = "Energy Consumption (kWh)", color = "Group") +
+  theme_minimal()
+
+# Plot 2: Temperature and Global Radiation Over Time
+p2 <- ggplot(merge_ts, aes(x = DAY)) +
+  geom_line(aes(y = LT, color = "Temperature")) +
+  geom_line(aes(y = GLOB, color = "Global Radiation")) +
+  labs(title = "Temperature and Global Radiation Over Time",
+       x = "Date", y = "Value (°C, W/m²)", color = "Variable") +
+  theme_minimal()
+
+# Combine the plots into a subplot
+p1 / p2
+```
+
+Using Kwiatkowski-Phillips-Schmidt-Shin KPSS test to check for stationarity for each column in the combined dataset.
+
+```{r}
+library(tseries)
+kpss.test(merge_ts_wide$Privat_KWH)
+kpss.test(merge_ts_wide$Industri_KWH)
+kpss.test(merge_ts_wide$Forretning_KWH)
+kpss.test((merge_ts_wide$LT))
+kpss.test((merge_ts_wide$GLOB))
+```
+
+We see that all three columns has a trend.
+
+```{r}
+adf.test(merge_ts_wide$Privat_KWH) #
+adf.test(merge_ts_wide$Industri_KWH) #
+adf.test(merge_ts_wide$Forretning_KWH) #
+adf.test(merge_ts_wide$LT) #
+adf.test(merge_ts_wide$GLOB) #
+
+```
+
+Due to a high p-value in the ADF test, and low p value in KPSS test, there is non stationarty in our time series.
+
+```{r}
+
+# Column 2 and so on
+cor(merge_ts_wide[,2:6])
+```
+
+Plotting all ACF in one plot, make
+
+```{r warning=FALSE}
+library(ggplot2)
+library(forecast)
+library(dplyr)
+library(purrr)
+library(tidyr)
+
+# Define a function for plotting ACF or PACF
+plot_acf_pacf <- function(data, columns, type, span, title, vline) {
+  
+  # Check if type is valid
+  if (!type %in% c("partial", "correlation")) {
+    stop("Invalid type. Choose either 'partial' for PACF or 'correlation' for ACF.")
+  }
+  if (type == "correlation") {
+    span_extended = span+1
+  } else {
+    span_extended = span
+  }
+  
+  acf_data <- data %>%
+    select(all_of(columns)) %>%
+    map_dfr(~ {
+      acf_values <- Acf(.x, lag.max = span, type = type, plot = FALSE)$acf
+      data.frame(value = acf_values, lag = 1:span_extended)
+    }, .id = "variable")
+  
+
+  plot <- ggplot(acf_data, aes(x = lag, y = value, color = variable)) +
+    geom_line() +
+    labs(
+      title = title,
+      x = "Lag",
+      y = ifelse(type == "partial", "PACF", "ACF")
+    ) +
+    theme_minimal() +
+    theme(legend.title = element_blank())
+  
+  if (!is.null(vline)) {
+    plot <- plot + geom_vline(xintercept = vline, linetype = "dashed", color = "red")
+  }
+  return (plot)
+}
+
+
+plot_acf_pacf(
+  data = merge_ts_wide,
+  columns = c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT"),
+  type = "correlation",
+  vline = 7,
+  span = 28,
+  title="Autocorrelation Function for 28 days"
+)
+
+plot_acf_pacf(
+  data = merge_ts_wide,
+  columns = c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT"),
+  type = "correlation",
+  span = 3*365,
+  vline = 365,
+  title="Autocorrelation Function for 3 years"
+)
+
+
+plot_acf_pacf(
+  data = merge_ts_wide,
+  columns = c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT"),
+  type = "partial",
+  span = 28,
+  vline = 7,
+  title="Partial Autocorrelation Function for 28 days"
+)
+
+plot_acf_pacf(
+  data = merge_ts_wide,
+  columns = c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT"),
+  type = "partial",
+  span = 3*365,
+  vline = 365,
+  title="Partial Autocorrelation Function for 3 years"
+)
+```
+
+**Discussion of correlation structure**
+
+The dotted red line shows a year for the yearly timeline, and week for the weekly timeline.
+
+**Atuocorrelation** From the 28 day plot with ACF, we see that there is a seasonality in the correlation for Industri_KWH and Forretning_KWH. The correlation is highest at lag 7, which is a week. This is expected since the consumption of power is higher during weekdays than weekends. The correlation for GLOB and LT is highest at lag 1, and falling from there. GLOB falling faster than LT, indicating that the temperature is more autocorrelated than the global radiation.
+
+For the 3 year plot, we see that the correlation is highest at lag 365. This is similar for all our columns, indicating that there is a yearly seasonality in the data.
+
+**Partial correlation** The 28 day partial correlation plot shows that ther is high correlation after 6 and 7 days for Industri_KWH and Forretning_KWH. Also a negative correlation after 8 days, which was not very clear in the autocorrelation plot. For the rest of the columns, the partial correlation is highest at lag 1, and falling from there.
+
+For the 3 year plot, there is no clear correlation over a long span, but FOrretning_KWH and Industri_KWH is more volatile in the beginning.
+
+## Task E Perform seasonal differencing
+
+```{r Performin seasonal differencing, then plotting}
+# Columns to perform seasonal differencing on
+columns <- c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT")
+
+# Set up a 2x3 grid for larger subplots (one extra space will be unused)
+par(mfrow = c(2, 3))
+
+# Loop over each column to perform seasonal differencing and plot
+for (col in columns) {
+  # Perform seasonal differencing for each column
+  seasonal_diff <- diff(merge_ts_wide[[col]], lag = 365)
+  
+  # Plot without dates on x-axis, using a line plot type
+  plot(seasonal_diff, type = "l", main = paste(col),
+       ylab = "Differenced Values", xlab = "Time")
+}
+mtext("Seasonal Difference", outer = TRUE, cex = 1, line = -1.5)
+# Reset plotting layout
+par(mfrow = c(1, 1))
+```
+
+From the seasonal difference there is some patterns emerging.
+
+```{r Performing ACF and PACF on the seasonal differenced data}
+
+# Columns to perform ACF on
+columns <- c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT")
+
+# Set up a 2x3 grid for larger subplots (one extra space will be unused)
+par(mfrow = c(2, 3))
+
+# Loop over each column to calculate and plot ACF
+for (col in columns) {
+  # Perform seasonal differencing for each column
+  seasonal_diff <- diff(merge_ts_wide[[col]], lag = 365)
+  
+  # Plot the ACF without dates on x-axis
+  acf(seasonal_diff, main = paste(col), lag.max = 7)
+}
+
+# Add a main title for the entire plot
+mtext("ACF of Seasonally Differenced Series", outer = TRUE, cex = 1, line = -1)
+
+# Reset plotting layout
+par(mfrow = c(1, 1))
+```
+
+```{r ACF plots for seasonal differenced weeks}
+# Columns to perform ACF on
+columns <- c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT")
+
+# Set up a 2x3 grid for larger subplots (one extra space will be unused)
+par(mfrow = c(2, 3))
+
+# Loop over each column to calculate and plot ACF
+for (col in columns) {
+  # Perform seasonal differencing for each column
+  seasonal_diff <- diff(merge_ts_wide[[col]], lag = 365)
+  
+  # Plot the ACF without dates on x-axis
+  acf(seasonal_diff, main = paste(col), lag.max = 28)
+}
+
+# Add a main title for the entire plot
+mtext("ACF of Seasonally Differenced Series over 4 weeks.", outer = TRUE, cex = 1, line = -1)
+
+# Reset plotting layout
+par(mfrow = c(1, 1))
+```
+
+```{r PACF plots}
+
+# Set up columns and frame for subplots
+columns <- c("Privat_KWH", "Industri_KWH", "Forretning_KWH", "GLOB", "LT")
+par(mfrow = c(2, 3))
+
+# Loop over each column to calculate and plot PACF
+for (col in columns) {
+  seasonal_diff <- diff(merge_ts_wide[[col]], lag = 365)
+  pacf(seasonal_diff, main = paste(col), lag.max = 2*365)
+}
+mtext("PACF of Seasonally Differenced Series over 2 years", outer = TRUE, cex = 1, line = -1)
+par(mfrow = c(1, 1))
+```
+
+## Task F
+
+```{r Adding frequency to ts_data_frame, warning=FALSE}
+# Make the data into a ts object with frequency 365
+ts_data <- as.data.frame(lapply(merge_ts_wide[, -1], function(column) {
+  ts(column, frequency = 365)}))
+```
+
+```{r Smoothing all columns, 3 day lag}
+smooth_ts_LT <- stats::filter(ts_data$LT, filter = rep(1/3, 3), sides = 2)
+smooth_ts_GLOB <- stats::filter(ts_data$GLOB, filter = rep(1/3, 3), sides = 2)
+smooth_ts_Forretning_KWH <- stats::filter(ts_data$Forretning_KWH, filter = rep(1/3, 3), sides = 2)
+smooth_ts_Industri_KWH <- stats::filter(ts_data$Industri_KWH, filter = rep(1/3, 3), sides = 2)
+smooth_ts_Privat_KWH <- stats::filter(ts_data$Privat_KWH, filter = rep(1/3, 3), sides = 2)
+```
+
+```{r Performing STl on all columns}
+stl_LT <- stl(ts_data$LT, s.window = 10, t.window =3*365, robust=TRUE)
+stl_GLOB <- stl(ts_data$GLOB, s.window = 10, t.window =3*365, robust=TRUE)
+stl_Forretning_KWH <- stl(ts_data$Forretning_KWH, s.window = 10, t.window =3*365, robust=TRUE)
+stl_Industri_KWH <- stl(ts_data$Industri_KWH, s.window = 10, t.window =3*365, robust=TRUE)
+stl_Privat_KWH <- stl(ts_data$Privat_KWH, s.window = 10, t.window =3*365, robust=TRUE)
+```
+
+```{r Extracting seasonal component}
+seasonal_component_LT <- stl_LT$time.series[, "seasonal"]
+seasonal_component_GLOB <- stl_GLOB$time.series[, "seasonal"]
+seasonal_component_Forretning_KWH <- stl_Forretning_KWH$time.series[, "seasonal"]
+seasonal_component_Industri_KWH <- stl_Industri_KWH$time.series[, "seasonal"]
+seasonal_component_Privat_KWH <- stl_Privat_KWH$time.series[, "seasonal"]
+
+```
+
+```{r Detrending the data}
+detrendes_series_LT <- ts_data$LT - seasonal_component_LT
+detrendes_series_GLOB <- ts_data$GLOB - seasonal_component_GLOB
+detrendes_series_Forretning_KWH <- ts_data$Forretning_KWH - seasonal_component_Forretning_KWH
+detrendes_series_Industri_KWH <- ts_data$Industri_KWH - seasonal_component_Industri_KWH
+detrendes_series_Privat_KWH <- ts_data$Privat_KWH - seasonal_component_Privat_KWH
+
+plot(detrendes_series_LT)
+```
+## Task G
+The null hypotesis of the Granger causality test is that the past values of the potential cause do not have any effect on the current value of the potential effect. If the p-value is less than 0.05, we reject the null hypothesis and conclude that the potential cause Granger causes the potential effect.
+
+
+```{r eval=FALSE, include=FALSE}
+# Do Granger causality test
+library(vars)
+library(crayon)
+
+# Create a data frame with the variables
+data <- data.frame(PRIVAT = scale(ts_data$Privat_KWH),
+FORRETNING = scale(ts_data$Forretning_KWH),
+INDUSTRI = scale(ts_data$Industri_KWH),
+GLOB = scale(ts_data$GLOB),
+LT = scale(ts_data$LT))
+
+# Perform the Granger causality test
+for (i in c("PRIVAT", "FORRETNING", "INDUSTRI", "GLOB", "LT")) {
+for (j in c("PRIVAT", "FORRETNING", "INDUSTRI", "GLOB", "LT")) {
+if (i != j) {
+model <- VAR(ts_data[, c(i, j)], p = 1)
+granger_test <- causality(model, cause = i)
+if (granger_test$Granger$p.value < 0.05) {
+cat(green(paste(i, "causes", j, "with p-value of:", granger_test$Granger$p.value, "\n")))
+}
+else {
+cat(red(paste(i, "does not cause", j, "with p-value of:", granger_test$Granger$p.value, "\n")))
+}
+}
+}
+}
+```
+
+
+
+# meake data frame with the non-seasonal data
+data <- data.frame(PRIVAT = PRIVAT_remainder,
+FORRETNING = FORRETNING_remainder,
+INDUSTRI = INDUSTRI_remainder,
+GLOB = GLOB_remainder,
+LT = LT_remainder)
+
+
+# preform granger test on the non-seasonal data
+for (i in c("PRIVAT", "FORRETNING", "INDUSTRI", "GLOB", "LT")) {
+for (j in c("PRIVAT", "FORRETNING", "INDUSTRI", "GLOB", "LT")) {
+if (i != j) {
+model <- VAR(data[, c(i, j)], p = 1)
+granger_test <- causality(model, cause = i)
+if (granger_test$Granger$p.value < 0.05) {
+cat(green(paste(i, "causes", j, "with p-value of:", granger_test$Granger$p.value, "\n")))
+}
+else {
+cat(red(paste(i, "does not cause", j, "with p-value of:", granger_test$Granger$p.value, "\n")))
+}
+}
+}
+}
+
+
+We see that Forretning Granger causes Industri and vise versa. This means that Granger causality does not implies causality.
+
+## Task H
+Forecast private electricity consumption, global irradiation and air temperature.
+
+```{r warning=FALSE}
+library(forecast)
+
+mod_sarima_private <- Arima(smooth_ts_Privat_KWH, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+```
+
+```{r}
+mod_sarima_LT <- Arima(ts_data$LT, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+```
+
+```{r}
+mod_sarima_GLOB <- Arima(ts_data$GLOB, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+```
+With only two seasons of data to forecast on, there is not enough years to catch the variations over the different seasons. This yields some large confidence intervals. 
+
+
+```{r Defining function for cross validation}
+library(Metrics)
+CV.2 <- function(data, model_fct, init_fold = 1248 - 90 * 5, h = 90, return_models = FALSE,
+...) {
+fold_inds <- seq(init_fold, length(data) - h, by = h)
+rmse <- c()
+models <- list()
+for (i in seq_along(fold_inds)) {
+fold <- fold_inds[i]
+train <- data[1:(fold - 1)]
+test <- data[fold:(fold + h - 1)]
+new_model <- model_fct(train, ...)
+models[[i]] <- new_model
+forecast <- forecast(new_model, h = h)
+rmse <- c(rmse, rmse(forecast$mean, test))
+}
+if (return_models) {
+return(list(rmse = rmse, model = models))
+} else {
+return(rmse)
+}
+
+}
+```
+
+```{r Performing cv on LT, warning=FALSE}
+error_LT <- CV.2(ts_data$LT, Arima, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+error
+```
+
+```{r Performing cv on GLOB, warning=FALSE}
+error_GLOB <- CV.2(ts_data$GLOB, Arima, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+error_GLOB
+```
+
+```{r Performing cv on Privat_KWH, warning=FALSE}
+error_Privat <- CV.2(smooth_ts_Privat_KWH, Arima, order = c(1, 0, 1), seasonal = list(order = c(0, 1, 0), period = 365))
+error_Privat
+```
+
+```{r Shapiro test on RMS from CV LT}
+shapiro.test(error_LT)
+```
+
+```{r Shapiro test on RMS from CV GLOB}
+shapiro.test(error_GLOB)
+```
+
+```{r Shapiro test on RMS from CV Privat_KWH}
+shapiro.test(error_Privat)
+```
+
+# Task 3
+
+## Task 1
+Performing multivariate forecasing using Sarimax on detrended and not detrended time series.
+Thereafter discussing possible pros and cons of the exogenous variables and the detrending. 
+
+```{r }
+X_LT <- cbind(
+  GLOB = ts_data$GLOB,
+  Privat_KWH = ts_data$Privat_KWH
+)
+
+X_Privat_KWH <- cbind(
+  GLOB = ts_data$GLOB,
+  LT = ts_data$LT
+)
+
+X_GLOB <- cbind(
+  LT = ts_data$LT,
+  Privat_KWH = ts_data$Privat_KWH
+)
+```
+
+
+```{r Running ARIMAX}
+model <- Arima(ts_data$LT, order = c(1, 0, 1),  xreg = X_LT)
+
+#Forecast
+forecast_model <- forecast(model, h = 5*365, xreg = X_LT)
+plot(forecast_model)
+```
+
+```{r }
+model <- Arima(ts_data$Privat_KWH, order = c(1, 1, 1),  xreg = X_Privat_KWH)
+
+# Then forecast with xreg
+forecast_model <- forecast(model, h = 5*365, xreg = X_Privat_KWH)
+
+#Plot forecast
+plot(forecast_model)
+```
+
+```{r }
+model <- Arima(ts_data$Privat_KWH, order = c(1, 0, 1),  xreg = X_Privat_KWH)
+
+#Forecast
+forecast_model <- forecast(model, h = 5*365, xreg = X_Privat_KWH)
+plot(forecast_model)
+```
+
+Performning Arimax on the detrended data.
+
+```{r}
+X_LT <- cbind(
+  GLOB = detrendes_series_GLOB,
+  Privat_KWH = detrendes_series_Privat_KWH
+)
+
+X_Privat_KWH <- cbind(
+  GLOB = detrendes_series_GLOB,
+  LT = detrendes_series_LT
+)
+
+X_GLOB <- cbind(
+  LT = detrendes_series_LT,
+  Privat_KWH = detrendes_series_Privat_KWH
+)
+```
+
+```{r}
+model <- Arima(detrendes_series_LT, order = c(1, 0, 1),  xreg = X_LT)
+forecast_model <- forecast(model, h = 5*365, xreg = X_LT)
+plot(forecast_model)
+```
+
+```{r}
+model <- Arima(detrendes_series_GLOB, order = c(1, 0, 1),  xreg = X_GLOB)
+forecast_model <- forecast(model, h = 5*365, xreg = X_GLOB)
+plot(forecast_model)
+```
+
+```{r}
+model <- Arima(detrendes_series_Privat_KWH, order = c(1, 0, 1),  xreg = X_Privat_KWH)
+forecast_model <- forecast(model, h = 5*365, xreg = X_Privat_KWH)
+plot(forecast_model)
+```
+
+```{r}
+
+```
