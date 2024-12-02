@@ -1,0 +1,104 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+  title: DAT320 Assignment 4
+---
+
+
+
+# Exercise 1 — German energy production
+
+In this exercise, we will explore electricity production in Germany in January 2024. Data have been downloaded from the ENTSO-E Transparency Platform (https://transparency.entsoe.eu), which provides data on energy production, transportn and consumption
+across Europe.
+
+## Notes
+
+- When you create plots, try to combine multiple plots on one figure so that it becomes easier to compare graphs.
+- Read Task E before you begin Task A. Gather explanations for each question in Task E.
+
+## Task A: Data Intake
+
+- Import `Actual Generation per Production Type_202401010000-202501010000.csv` and preprocess it.
+- Rename features to more suitable names for printing and plotting.
+- Check for missing values and handle them appropriately.
+- Change the `MTU` to an appropriate format.
+- Determine how much each source of electricity contributed to the total production.
+- Keep only the six largest sources of electricity.
+
+
+## Task B: Exploratory analysis
+
+- Limit the data to January 2024.
+- Visualize the time series for the six electricity sources retained for January. Use a grid to reduce the number of figures.
+- Compute pair-wise dissimilarity between all the selected columns.
+  - Create plots using Euclidean distance, Pearson (correlation) dissimilarity, DTW dissimilarity and AR.PIC.
+  - Select one distance-based and one scale-free variant that you will later apply in clustering.
+- For each series, compute autocorrelations and gather these in a grid of plots.
+- Give a brief summary of the insight you gathered.
+
+
+## Task C: Hierarchical clustering
+
+Perform hierarchical clustering and explore the different clusters
+
+- Use the dissimilarity metrics chosen in Task 2.
+- Plot dendrograms to compare the features.
+- Plot the six timeseries together in a single plot, colouring the lines based on the major clusters you observe.
+  - Repeat for both dissimilarity metrics.
+- Comment on the groupings you observe. 
+
+
+## Task D: HMM segmentation
+Use Hidden Markov Models to segment the time series.
+
+- Fit HMMs with two states for each of the production types.
+- Extract the states for all time-points for each series.
+- Visualize each of the timeseries coloured by their respective state vectors.
+- Comment on the patterns you observe and how they fit with intuition.
+
+## Task E: Discussion
+
+- Give a brief explanation of all the results in Tasks B, C, D.
+- Compare the methods and discuss the similarities and differences in the groups between the methods. 
+
+
+# Exercise 2 — Energy use at Ås: Weekdays and Weekends
+
+In this exercise, you will again work with the Energy consumption data for Ås used in Assignment 3. 
+The goal is now to deduct weekdays and weekends from the data.
+
+## Task F: Data intake
+
+- Import the data from `consumption_per_group_aas_hour.csv`. Make sure you handle time-zone information right.
+- Limit data to a contiguous range without longer stretches of missing data. Impute isolated missing data if necessary.
+- Do **not** remove 29 February. Since we are now looking for weekly patterns, removing 29 Feb may confuse results.
+- Visualise data in a way that makes weekly patterns visible.
+
+## Task G: Distance measures
+
+- For each of three consumer groups (private, business, industry), transform the consumption data into a $24\times n$ matrix containing one column per day.
+- Compute dissimilarity measures: For each consumer group, measure the distance from the time series for one day to the time series for all other days.
+- Compute and visualise the resulting distance matrices for at least two different dissimilarity measures.
+- Discuss which measures are most and least promising to classify days into weekdays and weekends. Are there differences for the consumer groups?
+
+Hints:
+
+- You may want to place some of the code into a function so that you can easily apply the analysis to each of the consumer groups.
+- Do not consider distances between different consumer groups (except maybe a general correlation check).
+- For exploration and plotting, limit yourself to data for 8-12 weeks.
+
+## Task H: Clustering
+
+- Cluster the daily time series using hierarchical clustering.
+- Cut the tree to two clusters (presumably corresponding to weekdays and weekends). 
+- Obtain ground truth weekday/weekend information from the calendar, e.g., using the `lubridate::wday()` function. Check the documentation to make sure you get the days of the week correct!
+- Compute a confusion matrix to check the quality of the clustering.
+- Are there differences between different dissimilarity measures?
+- Are there differences between the different consumer groups?
+
+## Task I: Investigating failure
+
+- For at least one consumer group and dissimilarity measure, find some days for which classification failed.
+- Plot the energy consumption curves for those days, maybe overlayed with curves for correctly classified days.
+- Discuss how curves differ, and discuss if the days were "special" (take a look at the calendar!).
